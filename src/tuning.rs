@@ -53,6 +53,20 @@ pub struct Match {
     pub cents: f32,
 }
 
+/// Nearest chromatic note to `freq` — voice mode has no strings to match.
+/// `string_no` is 0 (meaning "not a string").
+pub fn nearest_note(freq: f32, a4: f32) -> Match {
+    let midi_f = 69.0 + 12.0 * (freq / a4).log2();
+    let target_midi = midi_f.round() as i32;
+    let target_freq = midi_to_freq(target_midi, a4);
+    Match {
+        string_no: 0,
+        target_midi,
+        target_freq,
+        cents: 1200.0 * (freq / target_freq).log2(),
+    }
+}
+
 /// Finds the string (with `capo` semitones added per the cejilla) whose
 /// target pitch is closest to `freq`.
 pub fn nearest_string(freq: f32, tuning: Tuning, capo: i32, a4: f32) -> Match {

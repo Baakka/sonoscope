@@ -1,13 +1,18 @@
 //! Quick microphone diagnostic: prints the input device and 3 seconds of
 //! peak levels. All zeros means no signal — usually denied mic permission.
+//! Native only — the wasm build has no cpal.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+#[cfg(target_arch = "wasm32")]
+fn main() {}
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
     let host = cpal::default_host();
 
     println!("input devices:");

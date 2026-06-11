@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Flamenco Tuner Pro</title>
+    <link data-trunk rel="rust" data-bin="flamenco-tuner" data-wasm-opt="2" />
+    <style>
+        html, body {
+            margin: 0;
+            height: 100%;
+            overflow: hidden;
+            background: #100e0d;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            outline: none;
+        }
+        #loading {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #82766c;
+            font: 14px system-ui, sans-serif;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">loading flamenco tuner…</div>
+    <canvas id="tuner_canvas"></canvas>
+    <script>
+        // egui removes nothing on startup; hide the hint once wasm paints.
+        const loading = document.getElementById('loading');
+        new MutationObserver(() => { loading.style.display = 'none'; })
+            .observe(document.getElementById('tuner_canvas'), { attributes: true });
+        setTimeout(() => { loading.style.display = 'none'; }, 8000);
+    </script>
+</body>
+</html>

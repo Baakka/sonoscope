@@ -1,0 +1,10 @@
+[build]
+target = "index.html"
+release = true
+# Hostable from any sub-path (e.g. GitHub Pages project sites).
+public_url = "./"
+
+[serve]
+# getUserMedia needs a secure context; localhost counts.
+addresses = ["127.0.0.1"]
+port = 8080

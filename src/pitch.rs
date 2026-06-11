@@ -28,8 +28,9 @@ const YIN_LEN: usize = 4096;
 
 /// Guitar fundamentals: low D2 (73.4 Hz, rondeña) down to 55 for margin,
 /// up past a high E string with a cejilla at the 9th fret.
-const FMIN: f32 = 55.0;
-const FMAX: f32 = 600.0;
+pub const GUITAR_RANGE: (f32, f32) = (55.0, 600.0);
+/// Human voice: bass low E2 up to soprano C6.
+pub const VOICE_RANGE: (f32, f32) = (70.0, 1100.0);
 
 /// CMNDF ceiling for candidate dips. Loose on purpose: resonance from
 /// other strings raises the dip of the true pitch well above the classic
@@ -42,6 +43,9 @@ const STABLE_QUORUM: usize = 3;
 
 pub struct Detector {
     sample_rate: f32,
+    /// Fundamental search range (Hz), set per mode.
+    fmin: f32,
+    fmax: f32,
     fft: Arc<dyn Fft<f32>>,
     hann: Vec<f32>,
     /// Linear FFT magnitudes (amplitude-normalized), FFT_LEN/2 bins.
@@ -63,6 +67,8 @@ impl Detector {
             .collect();
         Self {
             sample_rate,
+            fmin: GUITAR_RANGE.0,
+            fmax: GUITAR_RANGE.1,
             fft,
             hann,
             mags: vec![0.0; FFT_LEN / 2],
@@ -75,6 +81,15 @@ impl Detector {
         self.sample_rate / FFT_LEN as f32
     }
 
+    /// Change the fundamental search range (e.g. guitar vs voice) and
+    /// drop any held state.
+    pub fn set_range(&mut self, range: (f32, f32)) {
+        if (self.fmin, self.fmax) != range {
+            (self.fmin, self.fmax) = range;
+            self.reset();
+        }
+    }
+
     /// Latest linear FFT magnitudes (for display).
     pub fn mags(&self) -> &[f32] {
         &self.mags
@@ -82,6 +97,58 @@ impl Detector {
 
     /// Update the spectrum from a full FFT_LEN window of samples.
     pub fn analyze_spectrum(&mut self, samples: &[f32]) {
+        let mut mags = std::mem::take(&mut self.mags);
+        self.mags_of(samples, &mut mags);
+        self.mags = mags;
+    }
+
+    /// Fuse the magnitude spectra of several microphones (the Mac mic plus
+    /// any number of phones). The mics free-run on independent clocks, so
+    /// time-domain summing would comb-filter; instead each stream's power
+    /// spectrum is averaged after loudness normalization. Harmonics every
+    /// mic hears survive; noise local to one mic is diluted by the count.
+    pub fn analyze_streams(&mut self, streams: &[&[f32]]) {
+        let Some((&first, rest)) = streams.split_first() else {
+            return;
+        };
+        if rest.is_empty() {
+            self.analyze_spectrum(first);
+            return;
+        }
+        let levels: Vec<f32> = streams.iter().map(|s| rms(s)).collect();
+        let reference = levels.iter().fold(0.0f32, |m, &x| m.max(x));
+        if reference <= 1e-6 {
+            self.analyze_spectrum(first);
+            return;
+        }
+
+        let mut acc = vec![0.0f32; FFT_LEN / 2];
+        let mut scratch = vec![0.0f32; FFT_LEN / 2];
+        let mut used = 0u32;
+        for (&stream, &level) in streams.iter().zip(&levels) {
+            // A mic hearing nothing (phone in a pocket) would only inject
+            // amplified noise after normalization — leave it out.
+            if level < 0.2 * reference {
+                continue;
+            }
+            self.mags_of(stream, &mut scratch);
+            let gain = reference / level;
+            for (a, &m) in acc.iter_mut().zip(scratch.iter()) {
+                let v = m * gain;
+                *a += v * v;
+            }
+            used += 1;
+        }
+        if used == 0 {
+            self.analyze_spectrum(first);
+            return;
+        }
+        for (m, a) in self.mags.iter_mut().zip(&acc) {
+            *m = (a / used as f32).sqrt();
+        }
+    }
+
+    fn mags_of(&self, samples: &[f32], out: &mut [f32]) {
         debug_assert_eq!(samples.len(), FFT_LEN);
         let mean = samples.iter().sum::<f32>() / samples.len() as f32;
         let mut buf: Vec<Complex<f32>> = samples
@@ -93,15 +160,34 @@ impl Detector {
         // Amplitude normalization: 2/N for the one-sided spectrum, /0.5 for
         // the Hann window's coherent gain.
         let norm = 4.0 / FFT_LEN as f32;
-        for (m, b) in self.mags.iter_mut().zip(&buf) {
+        for (m, b) in out.iter_mut().zip(&buf) {
             *m = b.norm() * norm;
         }
     }
 
-    /// Track the pitch in this window. Call `analyze_spectrum` first.
+    /// Track the pitch in this window (single-mic path; the app itself
+    /// always goes through `track_streams`). Call `analyze_spectrum` first.
     /// Returns a stabilized frequency once enough frames agree.
+    #[cfg(test)]
     pub fn track(&mut self, samples: &[f32]) -> Option<f32> {
-        let raw = self.estimate(&samples[samples.len() - YIN_LEN..]);
+        self.track_streams(&[samples])
+    }
+
+    /// Track the pitch using every microphone at once: YIN candidates are
+    /// collected per stream (a mic drowned in local interference simply
+    /// contributes no usable dips), merged, and scored against the fused
+    /// spectrum. Call `analyze_streams` first.
+    pub fn track_streams(&mut self, streams: &[&[f32]]) -> Option<f32> {
+        let mut candidates = Vec::new();
+        for s in streams {
+            candidates.extend(yin_candidates(
+                &s[s.len() - YIN_LEN..],
+                self.sample_rate,
+                self.fmin,
+                self.fmax,
+            ));
+        }
+        let raw = self.estimate(dedup_candidates(candidates));
         match raw {
             Some(f) => {
                 self.recent.push_back(f);
@@ -151,10 +237,10 @@ impl Detector {
     }
 
     /// Single-frame estimate: YIN candidates → spectral scoring → refinement.
-    fn estimate(&self, samples: &[f32]) -> Option<f32> {
-        let candidates = yin_candidates(samples, self.sample_rate);
+    fn estimate(&self, candidates: Vec<Candidate>) -> Option<f32> {
         let (best, score) = candidates
             .into_iter()
+            .filter(|c| self.has_harmonic_support(c.freq))
             .map(|c| {
                 // Harmonic energy, discounted by dip quality; a continuity
                 // bonus keeps the lock through brief interference.
@@ -187,6 +273,30 @@ impl Detector {
         let lo = (bin - 1.5).floor().max(0.0) as usize;
         let hi = ((bin + 1.5).ceil() as usize).min(self.mags.len() - 1);
         self.mags[lo..=hi].iter().fold(0.0f32, |m, &x| m.max(x))
+    }
+
+    /// A genuine fundamental has energy at its own frequency or across
+    /// several of its low harmonics. A subharmonic ghost (e.g. an
+    /// out-of-range 1 kHz tone surfacing as 333 Hz, since the signal is
+    /// also periodic at 3× the period) has energy at exactly one multiple
+    /// — reject those.
+    fn has_harmonic_support(&self, f: f32) -> bool {
+        let limit = self.sample_rate * 0.45;
+        let series: Vec<f32> = (1..=4)
+            .map(|k| {
+                let fk = f * k as f32;
+                if fk < limit { self.mag_near(fk) } else { 0.0 }
+            })
+            .collect();
+        let strongest = series.iter().fold(0.0f32, |m, &x| m.max(x));
+        // The series must carry real energy: within 60 dB of the loudest
+        // spectral component, not just numerical noise between partials.
+        let global = self.mags.iter().fold(0.0f32, |m, &x| m.max(x));
+        if strongest <= 1e-3 * global {
+            return false;
+        }
+        let present = |m: f32| m > 0.05 * strongest;
+        present(series[0]) || series.iter().filter(|&&m| present(m)).count() >= 2
     }
 
     /// Energy of the harmonic series of `f`, weighted 1/k so a true
@@ -260,11 +370,11 @@ struct Candidate {
 
 /// All local minima of the cumulative mean normalized difference function
 /// below CAND_THRESHOLD, refined to sub-sample precision.
-fn yin_candidates(samples: &[f32], sample_rate: f32) -> Vec<Candidate> {
+fn yin_candidates(samples: &[f32], sample_rate: f32, fmin: f32, fmax: f32) -> Vec<Candidate> {
     let n = samples.len();
     let w = n / 2;
-    let tau_max = ((sample_rate / FMIN) as usize).min(w - 1);
-    let tau_min = ((sample_rate / FMAX) as usize).max(2);
+    let tau_max = ((sample_rate / fmin) as usize).min(w - 1);
+    let tau_min = ((sample_rate / fmax) as usize).max(2);
     if tau_max <= tau_min + 2 {
         return Vec::new();
     }
@@ -309,7 +419,7 @@ fn yin_candidates(samples: &[f32], sample_rate: f32) -> Vec<Candidate> {
                 0.0
             };
             let freq = sample_rate / (tau as f32 + delta);
-            if (FMIN..=FMAX).contains(&freq) {
+            if (fmin..=fmax).contains(&freq) {
                 candidates.push(Candidate {
                     freq,
                     cmndf: cmndf[tau],
@@ -318,7 +428,12 @@ fn yin_candidates(samples: &[f32], sample_rate: f32) -> Vec<Candidate> {
         }
     }
 
-    // Keep the strongest few; drop near-duplicates (within 10 cents).
+    dedup_candidates(candidates)
+}
+
+/// Keep the strongest few candidates (best CMNDF dip first); drop
+/// near-duplicates (within 10 cents).
+fn dedup_candidates(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
     candidates.sort_by(|a, b| a.cmndf.total_cmp(&b.cmndf));
     let mut kept: Vec<Candidate> = Vec::new();
     for c in candidates {
@@ -449,6 +564,41 @@ pub mod tests {
     }
 
     #[test]
+    fn fused_mics_survive_single_mic_interference() {
+        // Three mics all hear A2; the first (also the loudest) catches a
+        // strong unrelated 207 Hz tone — handling noise next to that phone.
+        // Fusion dilutes the interferer 3× while A2 is reinforced by every
+        // mic, so the detector must still read A2.
+        let sr = 48000.0;
+        let dirty = mix(
+            &string_tone(110.0, 0.4, 0.0, sr, FFT_LEN),
+            &string_tone(207.0, 0.6, 0.5, sr, FFT_LEN),
+        );
+        let clean_b = string_tone(110.0, 0.3, 0.9, sr, FFT_LEN);
+        let clean_c = string_tone(110.0, 0.25, 2.2, sr, FFT_LEN);
+        let streams: [&[f32]; 3] = [&dirty, &clean_b, &clean_c];
+
+        let mut det = Detector::new(sr);
+        let mut out = None;
+        for _ in 0..RECENT_FRAMES {
+            det.analyze_streams(&streams);
+            out = det.track_streams(&streams);
+        }
+        let f = out.expect("no pitch detected");
+        assert_cents(f, 110.0, 3.0, "fused mics, one with interference");
+    }
+
+    #[test]
+    fn single_stream_fusion_matches_plain_analysis() {
+        let samples = string_tone(110.0, 0.5, 0.0, 48000.0, FFT_LEN);
+        let mut a = Detector::new(48000.0);
+        let mut b = Detector::new(48000.0);
+        a.analyze_spectrum(&samples);
+        b.analyze_streams(&[&samples]);
+        assert_eq!(a.mags(), b.mags());
+    }
+
+    #[test]
     fn rejects_silence_and_noise() {
         assert!(detect(&vec![0.0; FFT_LEN]).is_none());
         // Deterministic pseudo-noise
@@ -517,5 +667,50 @@ mod accuracy_report {
                 None => println!("  {label:<22} NOT DETECTED"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::tests as t;
+    use super::*;
+
+    fn detect_voice(samples: &[f32]) -> Option<f32> {
+        let mut det = Detector::new(48000.0);
+        det.set_range(VOICE_RANGE);
+        let mut out = None;
+        for _ in 0..RECENT_FRAMES {
+            det.analyze_spectrum(samples);
+            out = det.track(samples);
+        }
+        out
+    }
+
+    #[test]
+    fn voice_range_detects_sung_pitches() {
+        // A3 (tenor), A4 (alto), ~C6 territory (soprano) — beyond guitar range.
+        for target in [220.0, 440.0, 1000.0] {
+            let samples = t::string_tone(target, 0.4, 0.2, 48000.0, FFT_LEN);
+            let f = detect_voice(&samples).expect("no pitch detected");
+            let cents = cents_between(f, target);
+            assert!(
+                cents.abs() < 3.0,
+                "{target} Hz detected as {f} Hz ({cents:+.1} cents)"
+            );
+        }
+    }
+
+    #[test]
+    fn guitar_range_rejects_high_voice() {
+        // 1 kHz is outside the guitar range; the guitar detector must not
+        // report it (or any subharmonic alias).
+        let samples = t::string_tone(1000.0, 0.4, 0.0, 48000.0, FFT_LEN);
+        let mut det = Detector::new(48000.0);
+        let mut out = None;
+        for _ in 0..RECENT_FRAMES {
+            det.analyze_spectrum(&samples);
+            out = det.track(&samples);
+        }
+        assert!(out.is_none(), "guitar mode reported {out:?} for 1 kHz tone");
     }
 }

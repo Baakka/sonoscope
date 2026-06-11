@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Flamenco Tuner — Phone Mic</title>
+<style>
+  body {
+    margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 24px;
+    background: #100e0d; color: #e4dad0;
+    font-family: -apple-system, system-ui, sans-serif; text-align: center;
+  }
+  h1 { color: #ce243e; font-size: 1.4rem; margin: 0; }
+  #name {
+    font-size: 1rem; padding: 10px 14px; border-radius: 10px;
+    border: 1px solid #2c2622; background: #1e1a18; color: #e4dad0;
+    text-align: center; width: 60vw; max-width: 280px;
+  }
+  #go {
+    font-size: 1.3rem; padding: 18px 44px; border-radius: 14px; border: none;
+    background: #ffc400; color: #100e0d; font-weight: 700;
+  }
+  #go:disabled { background: #50dc78; }
+  #status { color: #82766c; }
+  #meter { width: 70vw; height: 14px; background: #2c2622; border-radius: 7px; overflow: hidden; }
+  #fill { height: 100%; width: 0%; background: #ce243e; transition: width 80ms linear; }
+</style>
+</head>
+<body>
+  <h1>♪ Flamenco Tuner — Phone Mic</h1>
+  <input id="name" maxlength="20" placeholder="device name">
+  <button id="go">Start streaming</button>
+  <div id="meter"><div id="fill"></div></div>
+  <p id="status">Tap the button and allow microphone access.<br>
+     Several phones can stream at once — give each a name.</p>
+<script>
+const btn = document.getElementById('go');
+const status = document.getElementById('status');
+const fill = document.getElementById('fill');
+const nameBox = document.getElementById('name');
+
+const ua = navigator.userAgent;
+nameBox.value =
+  /iPhone/.test(ua) ? 'iPhone' :
+  /iPad/.test(ua) ? 'iPad' :
+  /Android/.test(ua) ? 'Android' : 'phone';
+
+// Capture in an AudioWorklet (audio thread, no GC glitches); batches 128-
+// sample render quanta into ~2048-sample frames to keep message rate sane.
+const WORKLET = `
+class PcmTap extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Float32Array(4096); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (!ch) return true;
+    this.buf.set(ch, this.n);
+    this.n += ch.length;
+    if (this.n >= 2048) {
+      this.port.postMessage(this.buf.slice(0, this.n));
+      this.n = 0;
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-tap', PcmTap);`;
+
+function meter(data) {
+  let peak = 0;
+  for (let i = 0; i < data.length; i += 16) peak = Math.max(peak, Math.abs(data[i]));
+  fill.style.width = Math.min(100, peak * 300) + '%';
+}
+
+btn.onclick = async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: false, noiseSuppression: false, autoGainControl: false
+      }
+    });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    await ctx.resume();
+    const src = ctx.createMediaStreamSource(stream);
+    const ws = new WebSocket(`wss://${location.host}/ws`);
+    ws.binaryType = 'arraybuffer';
+    let teardown = () => {};
+
+    ws.onopen = async () => {
+      ws.send(JSON.stringify({ sr: ctx.sampleRate, name: nameBox.value || 'phone' }));
+      const onFrame = (data) => {
+        if (ws.readyState === 1) ws.send(data.buffer.slice(0));
+        meter(data);
+      };
+      if (ctx.audioWorklet) {
+        const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
+        await ctx.audioWorklet.addModule(url);
+        const node = new AudioWorkletNode(ctx, 'pcm-tap');
+        node.port.onmessage = (e) => onFrame(e.data);
+        const mute = ctx.createGain();
+        mute.gain.value = 0;
+        src.connect(node).connect(mute).connect(ctx.destination);
+        teardown = () => { node.disconnect(); src.disconnect(); };
+      } else {
+        // Fallback for old browsers without AudioWorklet.
+        const proc = ctx.createScriptProcessor(2048, 1, 1);
+        proc.onaudioprocess = (e) => onFrame(new Float32Array(e.inputBuffer.getChannelData(0)));
+        src.connect(proc);
+        proc.connect(ctx.destination);
+        teardown = () => { proc.disconnect(); src.disconnect(); };
+      }
+      btn.disabled = true;
+      nameBox.disabled = true;
+      btn.textContent = 'Streaming';
+      status.textContent = `Connected · ${ctx.sampleRate} Hz`;
+    };
+    ws.onclose = () => {
+      status.textContent = 'Disconnected — reload to reconnect.';
+      btn.disabled = false;
+      nameBox.disabled = false;
+      btn.textContent = 'Start streaming';
+      teardown();
+    };
+    ws.onerror = ws.onclose;
+  } catch (err) {
+    status.textContent = 'Error: ' + err.message;
+  }
+};
+</script>
+</body>
+</html>
