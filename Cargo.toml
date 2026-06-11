@@ -1,0 +1,13 @@
+[package]
+name = "flamenco-tuner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cpal = "0.15"
+eframe = "0.32"
+egui_plot = "0.33"
+rustfft = "6"
+
+[profile.release]
+opt-level = 3
