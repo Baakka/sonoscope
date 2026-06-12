@@ -45,7 +45,9 @@ metrics — is identical.
 ## Dashboard
 
 - **Tuner strip** — note readout, ±50¢ bar with in-tune zone, string badges
-  (guitar) or vibrato analytics (voice: rate, depth, center offset).
+  (guitar) or vibrato analytics (voice: rate, depth, center offset), and a
+  **duet line** reading two simultaneously ringing strings at once (see
+  below).
 - **Spectrum + peak tracking** — live FFT with peaks tracked across frames
   (adaptive threshold, parabolic interpolation, EMA-smoothed locations);
   the strongest tracks are labeled and tabulated with note names and cents.
@@ -69,6 +71,22 @@ Resonance-robust hybrid: YIN candidate dips → spectral harmonic scoring
 parabolic refinement (sub-cent) → median stabilizer. Guitar mode searches
 55–600 Hz with string matching (standard + rondeña tunings, cejilla 0–9);
 voice mode searches 70–1100 Hz with chromatic note matching.
+
+## Two-string separation (duet)
+
+A physics-informed Kalman filter separates two strings ringing at once
+from the single mic signal — no training data, no neural network. Each
+string is modeled as five harmonic phasors (damped 2-D rotations), making
+the mixture a *linear* state-space model once the fundamentals are known:
+the pitch detector seeds the primary, the strongest non-harmonic tracked
+spectral peak seeds the secondary. The filter's joint covariance
+disentangles partials that land near each other (A2's 4th and D3's 3rd
+both sit at ~440 Hz), and a phase-slope servo refines each fundamental to
+sub-cent (a model detune of Δf drifts harmonic k's phasor at k·Δf). The
+duet line in the tuner strip shows both string readings plus the model's
+residual. Inherent limit: a second string whose fundamental coincides
+with a harmonic of the first (e.g. E4 over A2) is not separable by
+frequency alone.
 
 ## Input filters
 
@@ -94,13 +112,14 @@ than sample-exact.
 ## Development
 
 ```sh
-cargo test --release                                  # 29 DSP/unit tests
+cargo test --release                                  # 45 DSP/unit tests
 cargo test --release report -- --ignored --nocapture  # detector accuracy table
 cargo run --release --bin miccheck                    # input device diagnostic
 ```
 
 Module map: `audio.rs` (capture + filter chain; cpal backend on native,
 Web Audio backend on wasm behind the same API), `pitch.rs` (detector),
-`dsp/` (filter, peaks, cqt, chroma, visibility, vibrato), `remote.rs`
+`dsp/` (filter, peaks, separate, cqt, chroma, visibility, vibrato),
+`remote.rs`
 (phone-mic HTTPS/WebSocket service), `gui/` (dashboard panels),
 `tuning.rs` (note math).

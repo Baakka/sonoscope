@@ -23,7 +23,10 @@ pub fn section(ui: &mut egui::Ui, app: &TunerApp, size: Vec2) {
         } else {
             String::new()
         };
-        format!("SPECTRUM · beam ×{} mics{fused} · tracked peaks", app.beam_mics)
+        format!(
+            "SPECTRUM · beam ×{} mics{fused} · tracked peaks",
+            app.beam_mics
+        )
     } else if extra > 0 {
         format!("SPECTRUM · fused ×{} mics · tracked peaks", app.fused_mics)
     } else {

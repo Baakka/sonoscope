@@ -1,7 +1,8 @@
 //! Tuner strip: big note readout, cents bar, strings row / vibrato card.
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, Vec2, pos2, vec2,
+    self, Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, StrokeKind, Vec2,
+    pos2, vec2,
 };
 
 use super::{DIM, FLAMENCO_RED, GREEN, Mode, PANEL, TRACK, TunerApp, zone_color};
@@ -30,7 +31,10 @@ pub fn tuner_strip(ui: &mut egui::Ui, app: &TunerApp, narrow: bool) {
         cents_bar(ui, app);
         ui.add_space(6.0);
         match app.mode {
-            Mode::Guitar => strings_row(ui, app),
+            Mode::Guitar => {
+                strings_row(ui, app);
+                duet_row(ui, app);
+            }
             Mode::Voice => vibrato_row(ui, app),
         }
         return;
@@ -48,11 +52,121 @@ pub fn tuner_strip(ui: &mut egui::Ui, app: &TunerApp, narrow: bool) {
             cents_bar(ui, app);
             ui.add_space(8.0);
             match app.mode {
-                Mode::Guitar => strings_row(ui, app),
+                Mode::Guitar => {
+                    strings_row(ui, app);
+                    duet_row(ui, app);
+                }
                 Mode::Voice => vibrato_row(ui, app),
             }
         });
     });
+}
+
+/// Duet sources that are genuinely sounding (a seeded source whose string
+/// has faded reads near-zero level), as string matches with their level
+/// relative to the loudest, loudest first.
+fn duet_voices(app: &TunerApp) -> Vec<(tuning::Match, f32)> {
+    let loudest = app.duet.iter().map(|r| r.level).fold(0.0f32, f32::max);
+    if loudest <= 0.0 {
+        return Vec::new();
+    }
+    let mut voices: Vec<(tuning::Match, f32)> = app
+        .duet
+        .iter()
+        .filter(|r| r.level > 0.1 * loudest)
+        .map(|r| {
+            (
+                tuning::nearest_string(r.freq, app.tuning, app.capo, app.a4),
+                r.level / loudest,
+            )
+        })
+        .collect();
+    voices.sort_by(|a, b| b.1.total_cmp(&a.1));
+    voices
+}
+
+/// Pinned-height strip under the string badges: one pill per ringing
+/// string (note, cents, level bar), or a dim hint while the Kalman bank
+/// has fewer than two sources locked.
+fn duet_row(ui: &mut egui::Ui, app: &TunerApp) {
+    ui.add_space(4.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+    let p = ui.painter_at(rect);
+    p.text(
+        pos2(rect.left(), rect.center().y),
+        Align2::LEFT_CENTER,
+        "DUET",
+        FontId::proportional(10.0),
+        DIM,
+    );
+    let mut x = rect.left() + 42.0;
+
+    let voices = duet_voices(app);
+    if voices.len() < 2 {
+        p.text(
+            pos2(x, rect.center().y),
+            Align2::LEFT_CENTER,
+            "— two strings ringing together read separately here",
+            FontId::proportional(11.0),
+            DIM,
+        );
+        return;
+    }
+
+    for (m, level) in &voices {
+        let pill = Rect::from_min_size(pos2(x, rect.top() + 1.0), vec2(132.0, 24.0));
+        if pill.right() > rect.right() {
+            break;
+        }
+        let color = zone_color(m.cents);
+        p.rect_filled(pill, CornerRadius::same(6), PANEL);
+        p.rect_stroke(
+            pill,
+            CornerRadius::same(6),
+            Stroke::new(1.0, color.linear_multiply(0.7)),
+            StrokeKind::Inside,
+        );
+        p.text(
+            pos2(pill.left() + 8.0, pill.top() + 10.0),
+            Align2::LEFT_CENTER,
+            format!("{} · {}", m.string_no, tuning::note_name(m.target_midi)),
+            FontId::proportional(12.0),
+            color,
+        );
+        p.text(
+            pos2(pill.right() - 8.0, pill.top() + 10.0),
+            Align2::RIGHT_CENTER,
+            format!("{:+.1}¢", m.cents),
+            FontId::proportional(12.0),
+            color,
+        );
+        // Source level along the pill's bottom edge.
+        let bar = Rect::from_min_max(
+            pos2(pill.left() + 6.0, pill.bottom() - 6.0),
+            pos2(pill.right() - 6.0, pill.bottom() - 4.0),
+        );
+        p.rect_filled(bar, CornerRadius::same(1), TRACK);
+        p.rect_filled(
+            Rect::from_min_size(
+                bar.min,
+                vec2(bar.width() * level.clamp(0.05, 1.0), bar.height()),
+            ),
+            CornerRadius::same(1),
+            color.linear_multiply(0.8),
+        );
+        x = pill.right() + 8.0;
+    }
+
+    if app.level > 1e-4 {
+        let fit = 20.0 * (app.sep_residual / app.level.max(1e-6)).log10();
+        p.text(
+            pos2(x + 4.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            format!("residual {fit:.0} dB"),
+            FontId::proportional(10.0),
+            DIM,
+        );
+    }
 }
 
 fn cents_bar(ui: &mut egui::Ui, app: &TunerApp) {
@@ -103,6 +217,31 @@ fn cents_bar(ui: &mut egui::Ui, app: &TunerApp) {
         );
     }
 
+    // Duet: the second ringing string gets its own slimmer needle with a
+    // string-number tag, so both tuning errors show on one bar.
+    if let Some(r) = &app.reading {
+        for (m, _) in duet_voices(app) {
+            if m.string_no == r.string_no {
+                continue;
+            }
+            let c = m.cents.clamp(-SPAN_CENTS, SPAN_CENTS);
+            let x = x_of(c);
+            let color = zone_color(c);
+            painter.rect_filled(
+                Rect::from_center_size(pos2(x, track.center().y), vec2(3.0, track.height() + 6.0)),
+                CornerRadius::same(2),
+                color.linear_multiply(0.85),
+            );
+            painter.text(
+                pos2(x, rect.top() + 6.0),
+                Align2::CENTER_CENTER,
+                m.string_no.to_string(),
+                FontId::proportional(9.0),
+                color,
+            );
+        }
+    }
+
     let verdict_pos = pos2(track.center().x, rect.top() + 2.0);
     match &app.reading {
         Some(r) if r.cents.abs() <= IN_TUNE_CENTS => {
@@ -135,6 +274,12 @@ fn cents_bar(ui: &mut egui::Ui, app: &TunerApp) {
 fn strings_row(ui: &mut egui::Ui, app: &TunerApp) {
     let active = app.reading.as_ref().map(|r| r.string_no);
     let zone = app.reading.as_ref().map_or(GREEN, |r| zone_color(r.cents));
+    // Strings the Kalman bank hears ringing get an outline in their own
+    // tuning color, so both of a duet light up at once.
+    let duet: Vec<(usize, Color32)> = duet_voices(app)
+        .iter()
+        .map(|(m, _)| (m.string_no, zone_color(m.cents)))
+        .collect();
 
     ui.horizontal(|ui| {
         // Each badge is followed by add_space(6) plus egui's item spacing;
@@ -150,10 +295,25 @@ fn strings_row(ui: &mut egui::Ui, app: &TunerApp) {
         for (i, &open) in app.tuning.open_strings().iter().enumerate() {
             let no = 6 - i;
             let is_active = Some(no) == active;
+            let duet_hit = (!is_active)
+                .then(|| duet.iter().find(|(n, _)| *n == no).map(|(_, c)| *c))
+                .flatten();
             let (rect, _) = ui.allocate_exact_size(badge, Sense::hover());
             let fill = if is_active { zone } else { PANEL };
-            let text_color = if is_active { Color32::BLACK } else { DIM };
+            let text_color = match (is_active, duet_hit) {
+                (true, _) => Color32::BLACK,
+                (_, Some(c)) => c,
+                _ => DIM,
+            };
             ui.painter().rect_filled(rect, CornerRadius::same(6), fill);
+            if let Some(c) = duet_hit {
+                ui.painter().rect_stroke(
+                    rect,
+                    CornerRadius::same(6),
+                    Stroke::new(1.5, c),
+                    StrokeKind::Inside,
+                );
+            }
             let name = tuning::note_name(open + app.capo);
             let (label, font) = if compact {
                 (format!("{no}·{name}"), FontId::proportional(11.0))

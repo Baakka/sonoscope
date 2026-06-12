@@ -72,7 +72,13 @@ impl Correlator {
 
     /// Find where `delayed` lags `reference` (both CORR_LEN samples),
     /// searching lags in [lo, hi]. Positive lag = `delayed` is older.
-    pub fn estimate(&self, reference: &[f32], delayed: &[f32], lo: f32, hi: f32) -> Option<DelayEstimate> {
+    pub fn estimate(
+        &self,
+        reference: &[f32],
+        delayed: &[f32],
+        lo: f32,
+        hi: f32,
+    ) -> Option<DelayEstimate> {
         debug_assert_eq!(reference.len(), CORR_LEN);
         debug_assert_eq!(delayed.len(), CORR_LEN);
         // Hann window: without it the slice edges act like clicks and the
@@ -95,9 +101,7 @@ impl Correlator {
         // stream adds nothing. With this gate a sustained periodic tone
         // yields near-equal comb peaks — low confidence — instead of a
         // confidently wrong one, while broadband transients stay sharp.
-        let floor = |s: &[Complex<f32>]| {
-            3e-3 * s.iter().map(|c| c.norm()).fold(0.0f32, f32::max)
-        };
+        let floor = |s: &[Complex<f32>]| 3e-3 * s.iter().map(|c| c.norm()).fold(0.0f32, f32::max);
         let (fx, fy) = (floor(&x), floor(&y));
         let mut r: Vec<Complex<f32>> = x
             .iter()
@@ -108,7 +112,11 @@ impl Correlator {
                 }
                 let p = a.conj() * b;
                 let n = p.norm();
-                if n > 1e-12 { p / n } else { Complex::new(0.0, 0.0) }
+                if n > 1e-12 {
+                    p / n
+                } else {
+                    Complex::new(0.0, 0.0)
+                }
             })
             .collect();
         self.inv.process(&mut r);
@@ -319,7 +327,11 @@ mod tests {
             .estimate(x, &y, -200.0, 4000.0)
             .expect("no estimate");
         assert!((est.lag - d).abs() < 0.3, "lag {} expected {}", est.lag, d);
-        assert!(est.confidence > MIN_CONFIDENCE, "confidence {}", est.confidence);
+        assert!(
+            est.confidence > MIN_CONFIDENCE,
+            "confidence {}",
+            est.confidence
+        );
     }
 
     #[test]
@@ -407,12 +419,11 @@ mod tests {
             // src(p − delay) → offset O = +delay. Only the ring snapshot
             // (last 16384 samples) is materialized, plus the phone's own noise.
             let snap_total = 49000u64;
-            let snap: Vec<f32> =
-                frac_window(&src, (49000 - 16384) as f32 - true_delay, 16384)
-                    .iter()
-                    .zip(&noise_i)
-                    .map(|(&s, &m)| s + 0.5 * m)
-                    .collect();
+            let snap: Vec<f32> = frac_window(&src, (49000 - 16384) as f32 - true_delay, 16384)
+                .iter()
+                .zip(&noise_i)
+                .map(|(&s, &m)| s + 0.5 * m)
+                .collect();
 
             // Measure: Mac window at REF_AGE vs phone tail.
             let x = &mac_ring[16384 - REF_AGE - CORR_LEN..16384 - REF_AGE];

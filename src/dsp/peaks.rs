@@ -74,6 +74,20 @@ pub struct Track {
     missed: u32,
 }
 
+impl Track {
+    /// Test-only constructor (`missed` is private to this module).
+    #[cfg(test)]
+    pub fn synth(freq: f32, db: f32, age: u32) -> Self {
+        Self {
+            id: 0,
+            freq,
+            db,
+            age,
+            missed: 0,
+        }
+    }
+}
+
 /// Frame-to-frame peak association by nearest neighbor in cents.
 pub struct Tracker {
     tracks: Vec<Track>,

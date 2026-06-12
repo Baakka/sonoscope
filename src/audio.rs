@@ -134,9 +134,11 @@ mod native {
                     let device = host.default_output_device().ok_or("no output device")?;
                     let config = device.default_output_config()?;
                     if config.sample_format() != cpal::SampleFormat::F32 {
-                        return Err(
-                            format!("output format {} unsupported", config.sample_format()).into(),
-                        );
+                        return Err(format!(
+                            "output format {} unsupported",
+                            config.sample_format()
+                        )
+                        .into());
                     }
                     let channels = config.channels() as usize;
                     let samples = crate::dsp::align::chirp(config.sample_rate().0 as f32);
@@ -322,8 +324,8 @@ registerProcessor('pcm-tap', PcmTap);
     /// background. Samples start flowing into the ring once the user grants
     /// the mic and the first gesture resumes the context.
     pub fn start() -> Result<AudioEngine, Box<dyn std::error::Error>> {
-        let ctx = web_sys::AudioContext::new()
-            .map_err(|e| format!("AudioContext unavailable: {e:?}"))?;
+        let ctx =
+            web_sys::AudioContext::new().map_err(|e| format!("AudioContext unavailable: {e:?}"))?;
         let sample_rate = ctx.sample_rate();
 
         let ring: Arc<Mutex<MonoRing>> = Arc::new(Mutex::new(MonoRing {
@@ -430,8 +432,8 @@ registerProcessor('pcm-tap', PcmTap);
         };
         let mut scratch: Vec<f32> = Vec::new();
         let port = node.port()?;
-        let onmsg = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
-            move |ev: web_sys::MessageEvent| {
+        let onmsg =
+            Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |ev: web_sys::MessageEvent| {
                 let data = js_sys::Float32Array::new(&ev.data());
                 scratch.resize(data.length() as usize, 0.0);
                 data.copy_to(&mut scratch);
@@ -445,8 +447,7 @@ registerProcessor('pcm-tap', PcmTap);
                 while mono.buf.len() > RING_LEN {
                     mono.buf.pop_front();
                 }
-            },
-        );
+            });
         port.set_onmessage(Some(onmsg.as_ref().unchecked_ref()));
         onmsg.forget();
         Ok(())

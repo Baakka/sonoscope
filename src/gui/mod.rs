@@ -23,6 +23,7 @@ use crate::dsp::align::{self, Correlator, Servo};
 use crate::dsp::chroma::{self, Chord, KeyEstimator};
 use crate::dsp::cqt::Cqt;
 use crate::dsp::peaks::{self, Tracker};
+use crate::dsp::separate;
 use crate::dsp::visibility::{self, VisMetrics};
 use crate::pitch::{self, FFT_LEN, GUITAR_RANGE, VOICE_RANGE};
 use crate::remote::RemoteMics;
@@ -71,6 +72,13 @@ pub struct TunerApp {
     envelope: VecDeque<f32>,
     pub(crate) vis: VisMetrics,
 
+    /// Kalman oscillator bank: two-string decomposition (guitar mode).
+    separator: separate::Separator,
+    pub(crate) duet: Vec<separate::SourceReading>,
+    pub(crate) sep_residual: f32,
+    /// Ring `total` already fed to the separator.
+    sep_total: u64,
+
     pub(crate) mode: Mode,
     pub(crate) tuning: Tuning,
     pub(crate) capo: i32,
@@ -117,6 +125,10 @@ impl TunerApp {
             key: None,
             envelope: VecDeque::with_capacity(ENVELOPE_LEN + 1),
             vis: VisMetrics::default(),
+            separator: separate::Separator::new(sample_rate),
+            duet: Vec::new(),
+            sep_residual: 0.0,
+            sep_total: 0,
             mode: Mode::Guitar,
             tuning: Tuning::Standard,
             capo: 0,
@@ -255,6 +267,33 @@ impl TunerApp {
         {
             self.history.pop_front();
         }
+
+        // Two-string Kalman decomposition: seeded by the detector's lock
+        // plus a non-harmonic tracked peak; fed only the samples that
+        // arrived since the last frame so the filter state is continuous.
+        if self.mode == Mode::Guitar
+            && audible
+            && let Some(primary) = self.reading.as_ref().map(|r| r.freq)
+        {
+            let mut seeds = vec![primary];
+            if let Some(second) =
+                separate::pick_second(primary, self.tracker.tracks(), GUITAR_RANGE)
+            {
+                seeds.push(second);
+            }
+            self.separator.set_sources(&seeds);
+            let fresh = (mac_total - self.sep_total).min(RING_LEN as u64) as usize;
+            if fresh > 0 {
+                self.separator.process(&self.window[RING_LEN - fresh..]);
+            }
+            self.duet = self.separator.readings();
+            self.sep_residual = self.separator.residual_rms();
+        } else {
+            self.separator.clear();
+            self.duet.clear();
+            self.sep_residual = 0.0;
+        }
+        self.sep_total = mac_total;
     }
 
     /// Run one alignment-servo step per phone, build the delay-and-sum beam
